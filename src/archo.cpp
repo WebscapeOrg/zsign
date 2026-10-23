@@ -340,7 +340,11 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 	string strEmptyEntitlements = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict/>\n</plist>\n";
 	ZSign::SlotBuildRequirements(strBundleId, pSignAsset->m_strSubjectCN, strRequirementsSlot);
 	ZSign::SlotBuildEntitlements(IsExecute() ? pSignAsset->m_strEntitleData : strEmptyEntitlements, strEntitlementsSlot);
-	ZSign::SlotBuildDerEntitlements(IsExecute() ? pSignAsset->m_strEntitleData : "", strDerEntitlementsSlot);
+	if (IsExecute() && !pSignAsset->m_strEntitleData.empty()
+		&& !ZSign::SlotBuildDerEntitlements(pSignAsset->m_strEntitleData, strDerEntitlementsSlot)) {
+		ZLog::Error("Failed to encode DER entitlements.\n");
+		return false;
+	}
 
 	string strRequirementsSlotSHA1;
 	string strRequirementsSlotSHA256;

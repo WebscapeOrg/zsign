@@ -4,6 +4,7 @@
 #include "openssl.h"
 #include "signing.h"
 #include <algorithm>
+#include <stdexcept>
 #include <openssl/sha.h>
 
 void ZSign::_DERLength(string& strBlob, uint64_t uLength)
@@ -28,15 +29,23 @@ string ZSign::_DER(const jvalue& data)
 		strOutput.append(1, 1);
 		strOutput.append(1, data.as_bool() ? (char)0xff : (char)0x00);
 	} else if (data.is_int()) {
-		uint64_t uVal = data.as_int64();
+		// DER INTEGER is a minimal, signed, big-endian two's-complement value.
+		// Keep a sign byte when removing it would change the sign, and always
+		// encode at least one byte (including for zero).
+		uint64_t uVal = static_cast<uint64_t>(data.as_int64());
+		unsigned char bytes[sizeof(uVal)];
+		for (size_t i = 0; i < sizeof(bytes); i++) {
+			bytes[sizeof(bytes) - i - 1] = static_cast<unsigned char>(uVal >> (i * 8));
+		}
+		size_t start = 0;
+		while (start + 1 < sizeof(bytes)
+			&& ((bytes[start] == 0x00 && (bytes[start + 1] & 0x80) == 0)
+				|| (bytes[start] == 0xff && (bytes[start + 1] & 0x80) != 0))) {
+			start++;
+		}
 		strOutput.append(1, 0x02);
-		_DERLength(strOutput, uVal);
-
-		uint32_t sLength = (64 - ZUtil::builtin_clzll(uVal) + 7) / 8;
-		sLength *= 8;
-		do {
-			strOutput.append(1, (char)(uVal >> (sLength -= 8)));
-		} while (sLength != 0);
+		_DERLength(strOutput, sizeof(bytes) - start);
+		strOutput.append(reinterpret_cast<const char*>(bytes + start), sizeof(bytes) - start);
 	} else if (data.is_string()) {
 		string strVal = data.as_cstr();
 		strOutput.append(1, 0x0c);
@@ -75,14 +84,8 @@ string ZSign::_DER(const jvalue& data)
 		strOutput.append(1, (char)0xb0);
 		_DERLength(strOutput, strDict.size());
 		strOutput += strDict;
-	} else if (data.is_double()) {
-		assert(false);
-	} else if (data.is_date()) {
-		assert(false);
-	} else if (data.is_data()) {
-		assert(false);
 	} else {
-		assert(false && "Unsupported Entitlements DER Type");
+		throw std::invalid_argument("DER entitlements support only booleans, integers, strings, arrays, and dictionaries");
 	}
 
 	return strOutput;
@@ -351,9 +354,16 @@ bool ZSign::SlotBuildDerEntitlements(const string& strEntitlements, string& strO
 	}
 
 	jvalue jvInfo;
-	jvInfo.read_plist(strEntitlements);
+	if (!jvInfo.read_plist(strEntitlements) || !jvInfo.is_object()) {
+		return false;
+	}
 
-	string strInnerDict = _DER(jvInfo);
+	string strInnerDict;
+	try {
+		strInnerDict = _DER(jvInfo);
+	} catch (const std::invalid_argument&) {
+		return false;
+	}
 
 	string strVersion;
 	strVersion.append(1, 0x02);

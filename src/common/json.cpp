@@ -2213,7 +2213,7 @@ bool jpreader::_read_value(jvalue& pval, ptoken& token)
 	case ptoken::E_PTOKEN_DATE:
 	{
 		string strval;
-		_decode_string(token, strval);
+		if (!_decode_string(token, strval)) return false;
 
 		tm ft = { 0 };
 		::sscanf_s(strval.c_str(), "%04d-%02d-%02dT%02d:%02d:%02dZ", &ft.tm_year, &ft.tm_mon, &ft.tm_mday, &ft.tm_hour, &ft.tm_min, &ft.tm_sec);
@@ -2225,14 +2225,14 @@ bool jpreader::_read_value(jvalue& pval, ptoken& token)
 	case ptoken::E_PTOKEN_DATA:
 	{
 		string strval;
-		_decode_string(token, strval);
+		if (!_decode_string(token, strval)) return false;
 		pval.assign_data(strval.c_str());
 	}
 	break;
 	case ptoken::E_PTOKEN_STRING:
 	{
 		string strval;
-		_decode_string(token, strval);
+		if (!_decode_string(token, strval)) return false;
 		pval = strval.c_str();
 	}
 	break;
@@ -2519,16 +2519,72 @@ bool jpreader::_decode_string(ptoken& token, string& strdec)
 	strdec.clear();
 	strdec.reserve(size_t(pend - pcursor));
 
+	if (token.type != ptoken::E_PTOKEN_STRING && token.type != ptoken::E_PTOKEN_KEY) {
+		// Base64 data and dates historically discard formatting whitespace.
+		while (pcursor != pend) {
+			char c = *pcursor++;
+			if (c != '\n' && c != '\r' && c != '\t') strdec += c;
+		}
+		return true;
+	}
+
+	// Whitespace inside strings/keys is significant. Decode entities in one
+	// pass so, for example, &amp;lt; becomes the literal text "&lt;", not "<".
 	while (pcursor != pend) {
-		const char* chunk_start = pcursor;
-		while (pcursor != pend && *pcursor != '\n' && *pcursor != '\r' && *pcursor != '\t') {
-			++pcursor;
-		}
-		if (pcursor != chunk_start) {
-			strdec.append(chunk_start, (size_t)(pcursor - chunk_start));
-		}
-		if (pcursor != pend) {
-			++pcursor;
+		char c = *pcursor++;
+		if (c != '&') {
+			// Apple's plist parser preserves literal CR/CRLF in strings too.
+			strdec += c;
+		} else {
+			const char* begin = pcursor;
+			while (pcursor != pend && *pcursor != ';') ++pcursor;
+			if (pcursor == pend) return _add_error("Unterminated XML entity", begin - 1);
+			string entity(begin, pcursor++);
+			if (entity == "amp") strdec += '&';
+			else if (entity == "lt") strdec += '<';
+			else if (entity == "gt") strdec += '>';
+			else if (entity == "quot") strdec += '"';
+			else if (entity == "apos") strdec += '\'';
+			else if (!entity.empty() && entity[0] == '#') {
+				const bool hex = entity.size() > 1 && entity[1] == 'x';
+				const size_t first = hex ? 2 : 1;
+				const uint32_t radix = hex ? 16 : 10;
+				uint32_t scalar = 0;
+				if (first == entity.size()) return _add_error("Empty XML character reference", begin);
+				for (size_t i = first; i < entity.size(); ++i) {
+					const char digit = entity[i];
+					const uint32_t value = digit >= '0' && digit <= '9' ? digit - '0' :
+						digit >= 'a' && digit <= 'f' ? digit - 'a' + 10 :
+						digit >= 'A' && digit <= 'F' ? digit - 'A' + 10 : radix;
+					if (value >= radix || scalar > (0x10ffff - value) / radix) {
+						return _add_error("Invalid XML character reference", begin);
+					}
+					scalar = scalar * radix + value;
+				}
+				if (!(scalar == 9 || scalar == 10 || scalar == 13 ||
+					(scalar >= 0x20 && scalar <= 0xd7ff) ||
+					(scalar >= 0xe000 && scalar <= 0xfffd) ||
+					(scalar >= 0x10000 && scalar <= 0x10ffff))) {
+					return _add_error("Invalid XML character reference", begin);
+				}
+				if (scalar < 0x80) {
+					strdec += (char)scalar;
+				} else if (scalar < 0x800) {
+					strdec += (char)(0xc0 | (scalar >> 6));
+					strdec += (char)(0x80 | (scalar & 0x3f));
+				} else if (scalar < 0x10000) {
+					strdec += (char)(0xe0 | (scalar >> 12));
+					strdec += (char)(0x80 | ((scalar >> 6) & 0x3f));
+					strdec += (char)(0x80 | (scalar & 0x3f));
+				} else {
+					strdec += (char)(0xf0 | (scalar >> 18));
+					strdec += (char)(0x80 | ((scalar >> 12) & 0x3f));
+					strdec += (char)(0x80 | ((scalar >> 6) & 0x3f));
+					strdec += (char)(0x80 | (scalar & 0x3f));
+				}
+			} else {
+				return _add_error("Unknown XML entity", begin);
+			}
 		}
 	}
 	return true;
