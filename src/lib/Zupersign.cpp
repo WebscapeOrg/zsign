@@ -4,6 +4,8 @@
 #include "macho.h"
 #include "bundle.h"
 #include "signing.h"
+#include <sys/stat.h>
+#include <stdexcept>
 
 static void print_ssl_err(char **exception, const char *reason) {
     unsigned long last_error = ERR_peek_last_error();
@@ -17,6 +19,57 @@ static void print_ssl_err(char **exception, const char *reason) {
              last_error,
              ERR_lib_error_string(last_error),
              ERR_reason_error_string(last_error));
+}
+
+int zsign_sign_adhoc(
+    const char *path,
+    const void *entitlements_xml, size_t xml_len,
+    uint32_t preserve_metadata,
+    char **exception
+) {
+    *exception = NULL;
+    try {
+        const uint32_t supported = ZSIGN_PRESERVE_IDENTIFIER | ZSIGN_PRESERVE_ENTITLEMENTS | ZSIGN_PRESERVE_FLAGS;
+        if ((preserve_metadata & ~supported) != 0 ||
+            (entitlements_xml == NULL) != (xml_len == 0)) {
+            throw std::invalid_argument("Invalid ad-hoc signing options");
+        }
+        struct stat info;
+        if (stat(path, &info) != 0 || (!S_ISDIR(info.st_mode) && !S_ISREG(info.st_mode))) {
+            throw std::runtime_error("Signing path is not a file or bundle");
+        }
+        ZSignAsset asset;
+        const string xml = entitlements_xml ? string(static_cast<const char *>(entitlements_xml), xml_len) : string();
+        if (!asset.Init(NULL, NULL, "", xml, true, true, false)) {
+            throw std::runtime_error("Could not initialize ad-hoc signer");
+        }
+        asset.m_bShallowSigning = true;
+        asset.m_bHasEntitlements = entitlements_xml != NULL;
+        // Encode once before modifying the product, then reuse the complete DER
+        // slot across architectures. Invalid/unsupported plist values fail here.
+        if (asset.m_bHasEntitlements && !ZSign::SlotBuildDerEntitlements(xml, asset.m_strDerEntitleSlot)) {
+            throw std::invalid_argument("Invalid or unsupported entitlements plist");
+        }
+        asset.m_uPreserveMetadata = preserve_metadata;
+        bool success;
+        if (S_ISDIR(info.st_mode)) {
+            ZBundle bundle;
+            success = bundle.SignBundle(&asset, path);
+        } else {
+            ZMachO macho;
+            success = macho.Init(path) && macho.Sign(&asset, true, "", "", "", "");
+        }
+        if (!success) {
+            throw std::runtime_error("Could not sign product (expected a Mach-O file or shallow executable bundle)");
+        }
+        return 0;
+    } catch (const std::exception& error) {
+        *exception = strdup(error.what());
+        return -1;
+    } catch (...) {
+        *exception = strdup("Unexpected ad-hoc signing failure");
+        return -1;
+    }
 }
 
 int zsign_sign(

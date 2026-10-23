@@ -309,6 +309,21 @@ static bool IsAppExtensionPath(const string& strPath)
 	return (0 == strPath.rfind("PlugIns/", 0) || 0 == strPath.rfind("Extensions/", 0));
 }
 
+bool ZBundle::SignBundle(ZSignAsset* asset, const string& path)
+{
+	m_pSignAsset = asset;
+	m_bForceSign = true;
+	m_strAppFolder = path;
+	jvalue node;
+	node["path"] = "/";
+	if (!GetSignFolderInfo(path, node)) {
+		return false;
+	}
+	// No files/folders entries: SignNode seals this bundle without traversing
+	// nested code, which SwiftBuild signs in separate, ordered tasks.
+	return SignNode(node);
+}
+
 bool ZBundle::SignNode(jvalue& jvNode)
 {
 	if (jvNode.has("files")) {

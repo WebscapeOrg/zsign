@@ -2,8 +2,8 @@
 #include "json.h"
 #include "archo.h"
 #include "signing.h"
-
-uint64_t ZArchO::s_uExecSegLimit = 0;
+#include "include/Zupersign.h"
+#include <stdexcept>
 
 ZArchO::ZArchO()
 {
@@ -51,7 +51,7 @@ bool ZArchO::Init(uint8_t* pBase, uint32_t uLength)
 		{
 			segment_command* seglc = (segment_command*)pLoadCommand;
 			if (0 == strcmp("__TEXT", seglc->segname)) {
-				s_uExecSegLimit = seglc->vmsize;
+				m_uExecSegLimit = seglc->vmsize;
 				for (uint32_t j = 0; j < BO(seglc->nsects); j++) {
 					section* sect = (section*)((pLoadCommand + sizeof(segment_command)) + sizeof(section) * j);
 					if (0 == strcmp("__text", sect->sectname)) {
@@ -71,7 +71,7 @@ bool ZArchO::Init(uint8_t* pBase, uint32_t uLength)
 		{
 			segment_command_64* seglc = (segment_command_64*)pLoadCommand;
 			if (0 == strcmp("__TEXT", seglc->segname)) {
-				s_uExecSegLimit = seglc->vmsize;
+				m_uExecSegLimit = seglc->vmsize;
 				for (uint32_t j = 0; j < BO(seglc->nsects); j++) {
 					section_64* sect = (section_64*)((pLoadCommand + sizeof(segment_command_64)) + sizeof(section_64) * j);
 					if (0 == strcmp("__text", sect->sectname)) {
@@ -337,13 +337,47 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 	string strEntitlementsSlot;
 	string strDerEntitlementsSlot;
 
-	string strEmptyEntitlements = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict/>\n</plist>\n";
-	ZSign::SlotBuildRequirements(strBundleId, pSignAsset->m_strSubjectCN, strRequirementsSlot);
-	ZSign::SlotBuildEntitlements(IsExecute() ? pSignAsset->m_strEntitleData : strEmptyEntitlements, strEntitlementsSlot);
-	if (IsExecute() && !pSignAsset->m_strEntitleData.empty()
-		&& !ZSign::SlotBuildDerEntitlements(pSignAsset->m_strEntitleData, strDerEntitlementsSlot)) {
-		ZLog::Error("Failed to encode DER entitlements.\n");
-		return false;
+	string identifier = strBundleId;
+	uint32_t flags = 0;
+	if (pSignAsset->m_bShallowSigning) {
+		ZSigningMetadata existing;
+		if (pSignAsset->m_uPreserveMetadata &&
+			!ZSign::ReadSigningMetadata(m_pSignBase, m_pSignBase ? m_uLength - m_uCodeLength : 0, existing)) {
+			ZLog::Error("Invalid signature metadata.\n");
+			return false;
+		}
+		if ((pSignAsset->m_uPreserveMetadata & ZSIGN_PRESERVE_IDENTIFIER) && !existing.identifier.empty()) {
+			identifier = existing.identifier;
+		}
+		if (pSignAsset->m_uPreserveMetadata & ZSIGN_PRESERVE_FLAGS) {
+			flags = existing.flags;
+		}
+		if (IsExecute()) {
+			if (pSignAsset->m_bHasEntitlements) {
+				ZSign::SlotBuildEntitlements(pSignAsset->m_strEntitleData, strEntitlementsSlot);
+				strDerEntitlementsSlot = pSignAsset->m_strDerEntitleSlot;
+			} else if (pSignAsset->m_uPreserveMetadata & ZSIGN_PRESERVE_ENTITLEMENTS) {
+				strEntitlementsSlot = existing.entitlementsSlot;
+				strDerEntitlementsSlot = existing.derEntitlementsSlot;
+				// Preserve existing DER bytes without decoding/re-encoding them. Older
+				// signatures may contain only XML, so generate the missing DER slot
+				// using the same encoder as freshly supplied entitlements.
+				if (!strEntitlementsSlot.empty() && strDerEntitlementsSlot.empty() &&
+					!ZSign::SlotBuildDerEntitlements(strEntitlementsSlot.substr(8), strDerEntitlementsSlot)) {
+					throw std::runtime_error("Invalid or unsupported preserved entitlements plist");
+				}
+			}
+		}
+		ZSign::SlotBuildRequirements(identifier, pSignAsset->m_strSubjectCN, strRequirementsSlot);
+	} else {
+		string strEmptyEntitlements = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict/>\n</plist>\n";
+		ZSign::SlotBuildRequirements(identifier, pSignAsset->m_strSubjectCN, strRequirementsSlot);
+		ZSign::SlotBuildEntitlements(IsExecute() ? pSignAsset->m_strEntitleData : strEmptyEntitlements, strEntitlementsSlot);
+		if (IsExecute() && !pSignAsset->m_strEntitleData.empty()
+			&& !ZSign::SlotBuildDerEntitlements(pSignAsset->m_strEntitleData, strDerEntitlementsSlot)) {
+			ZLog::Error("Failed to encode DER entitlements.\n");
+			return false;
+		}
 	}
 
 	string strRequirementsSlotSHA1;
@@ -414,9 +448,9 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 			m_uCodeLength,
 			pCodeSlots1Data,
 			uCodeSlots1DataLength,
-			s_uExecSegLimit,
+			m_uExecSegLimit,
 			uExecSegFlags,
-			strBundleId,
+			identifier,
 			pSignAsset->m_strTeamId,
 			strInfoSHA1,
 			strRequirementsSlotSHA1,
@@ -425,6 +459,7 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 			strDerEntitlementsSlotSHA1,
 			IsExecute(),
 			pSignAsset->m_bAdhoc,
+		flags,
 			strCodeDirectorySlot)) {
 			ZLog::Error(">>> Build SHA1 CodeDirectory failed!\n");
 			return false;
@@ -436,9 +471,9 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 		m_uCodeLength,
 		pCodeSlots256Data,
 		uCodeSlots256DataLength,
-		s_uExecSegLimit,
+		m_uExecSegLimit,
 		uExecSegFlags,
-		strBundleId,
+		identifier,
 		pSignAsset->m_strTeamId,
 		strInfoSHA256,
 		strRequirementsSlotSHA256,
@@ -447,6 +482,7 @@ bool ZArchO::BuildCodeSignature(ZSignAsset* pSignAsset,
 		strDerEntitlementsSlotSHA256,
 		IsExecute(),
 		pSignAsset->m_bAdhoc,
+		flags,
 		strAltnateCodeDirectorySlot)) {
 		ZLog::Error(">>> Build SHA256 CodeDirectory failed!\n");
 		return false;

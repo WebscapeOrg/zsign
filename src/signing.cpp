@@ -290,6 +290,63 @@ bool ZSign::SlotParseEntitlements(uint8_t* pSlotBase, CS_BlobIndex* pbi, string&
 	return true;
 }
 
+bool ZSign::ReadSigningMetadata(const uint8_t* data, size_t size, ZSigningMetadata& metadata)
+{
+	if (data == NULL) {
+		return true; // Unsigned binaries have no metadata to preserve.
+	}
+	auto read32 = [](const uint8_t* bytes) {
+		uint32_t value;
+		memcpy(&value, bytes, sizeof(value));
+		return LE(value);
+	};
+	if (size < 12 || read32(data) != CSMAGIC_EMBEDDED_SIGNATURE) {
+		return false;
+	}
+	const uint32_t length = read32(data + 4);
+	const uint32_t count = read32(data + 8);
+	if (length < 12 || length > size || count > (length - 12) / 8) {
+		return false;
+	}
+	bool foundDirectory = false;
+	for (uint32_t i = 0; i < count; ++i) {
+		const uint32_t type = read32(data + 12 + i * 8);
+		const uint32_t offset = read32(data + 16 + i * 8);
+		if (offset < 12 + count * 8 || offset > length - 8) {
+			return false;
+		}
+		const uint8_t* slot = data + offset;
+		const uint32_t slotLength = read32(slot + 4);
+		if (slotLength < 8 || slotLength > length - offset) {
+			return false;
+		}
+		if (type == CSSLOT_CODEDIRECTORY) {
+			if (foundDirectory || slotLength < 44 || read32(slot) != CSMAGIC_CODEDIRECTORY) {
+				return false;
+			}
+			const uint32_t identifierOffset = read32(slot + 20);
+			if (identifierOffset < 44 || identifierOffset >= slotLength) {
+				return false;
+			}
+			const char* identifier = reinterpret_cast<const char*>(slot + identifierOffset);
+			const char* end = static_cast<const char*>(memchr(identifier, 0, slotLength - identifierOffset));
+			if (!end || end == identifier) {
+				return false;
+			}
+			metadata.identifier.assign(identifier, end - identifier);
+			metadata.flags = read32(slot + 12);
+			foundDirectory = true;
+		} else if (type == CSSLOT_ENTITLEMENTS) {
+			if (!metadata.entitlementsSlot.empty() || read32(slot) != CSMAGIC_EMBEDDED_ENTITLEMENTS) return false;
+			metadata.entitlementsSlot.assign(reinterpret_cast<const char*>(slot), slotLength);
+		} else if (type == CSSLOT_DER_ENTITLEMENTS) {
+			if (!metadata.derEntitlementsSlot.empty() || read32(slot) != CSMAGIC_EMBEDDED_DER_ENTITLEMENTS) return false;
+			metadata.derEntitlementsSlot.assign(reinterpret_cast<const char*>(slot), slotLength);
+		}
+	}
+	return foundDirectory;
+}
+
 bool ZSign::ParseCodeSignatureEntitlements(uint8_t *pCSBase, string &entitlements)
 {
 	CS_SuperBlob *psb = (CS_SuperBlob *)pCSBase;
@@ -504,6 +561,7 @@ bool ZSign::SlotBuildCodeDirectory(bool bAlternate,
 	const string& strDerEntitlementsSlotSHA,
 	bool isExecuteArch,
 	bool isAdhoc,
+	uint32_t flags,
 	string& strOutput)
 {
 	strOutput.clear();
@@ -518,7 +576,11 @@ bool ZSign::SlotBuildCodeDirectory(bool bAlternate,
 	cdHeader.magic = BE((uint32_t)CSMAGIC_CODEDIRECTORY);
 	cdHeader.length = 0;
 	cdHeader.version = BE(uVersion);
-	cdHeader.flags = isAdhoc ? BE(static_cast<uint32_t>(CS_SEC_CODESIGNATURE_ADHOC)) : 0U;
+	// A rewritten signature is no longer linker-signed. Identity-dependent
+	// bits come from this signing operation, not from preserved metadata.
+	const uint32_t linkerSigned = 0x20000;
+	flags &= ~(linkerSigned | static_cast<uint32_t>(CS_SEC_CODESIGNATURE_ADHOC));
+	cdHeader.flags = BE(flags | (isAdhoc ? static_cast<uint32_t>(CS_SEC_CODESIGNATURE_ADHOC) : 0U));
 	cdHeader.hashOffset = 0;
 	cdHeader.identOffset = 0;
 	cdHeader.nSpecialSlots = 0;

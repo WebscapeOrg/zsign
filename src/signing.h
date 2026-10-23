@@ -1,10 +1,18 @@
 #pragma once
 #include "openssl.h"
 
+struct ZSigningMetadata {
+    string identifier;
+    uint32_t flags = 0;
+    string entitlementsSlot;
+    string derEntitlementsSlot;
+};
+
 class ZSign
 {
 public:
 	
+	static bool ReadSigningMetadata(const uint8_t* data, size_t size, ZSigningMetadata& metadata);
 	static bool SlotGetCodeSlotsData(uint8_t* pSlotBase, uint8_t*& pCodeSlots, uint32_t& uCodeSlotsLength);
 	static bool SlotBuildEntitlements(const string& strEntitlements, string& strOutput);
 	static bool SlotBuildDerEntitlements(const string& strEntitlements, string& strOutput);
@@ -25,6 +33,7 @@ public:
 										const string& strDerEntitlementsSlotSHA,
 										bool isExecuteArch,
 										bool isAdhoc,
+										uint32_t flags,
 										string& strOutput);
 	
 	static bool SlotBuildCMSSignature(ZSignAsset* pSignAsset,

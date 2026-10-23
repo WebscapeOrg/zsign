@@ -59,6 +59,13 @@ public:
 	static string	ASN1_TIMEtoString(const void* time);
 
 public:
+	// Shallow signing operates on one product at a time. Existing recursive
+	// signing retains its behavior unless this mode is explicitly selected.
+	bool m_bShallowSigning = false;
+	bool m_bHasEntitlements = false;
+	uint32_t m_uPreserveMetadata = 0;
+	string m_strDerEntitleSlot;
+
 	bool	m_bAdhoc;
 	bool	m_bSHA256Only;
 	bool	m_bSingleBinary;

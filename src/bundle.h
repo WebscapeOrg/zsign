@@ -36,6 +36,10 @@ public:
 					bool bEnableCache,
 					bool bRemoveProvision = false);
 
+	// Sign only this bundle's resource seal and executable. Its nested products
+	// must have been signed already by the caller/build graph.
+	bool SignBundle(ZSignAsset* asset, const string& path);
+
 private:
 	bool SignNode(jvalue& jvNode);
 	void GetNodeChangedFiles(jvalue& jvNode);

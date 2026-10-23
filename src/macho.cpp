@@ -14,7 +14,7 @@ ZMachO::ZMachO()
 
 ZMachO::~ZMachO()
 {
-	FreeArchOes();
+	Free();
 }
 
 bool ZMachO::Init(const char* szFile)
@@ -31,8 +31,11 @@ bool ZMachO::InitV(const char* szPath, ...)
 
 bool ZMachO::Free()
 {
+	// Signing can fail after mapping a file (for example, invalid preserved
+	// metadata). Release that mapping before FreeArchOes clears its address.
+	const bool closed = m_pBase == NULL || CloseFile();
 	FreeArchOes();
-	return CloseFile();
+	return closed;
 }
 
 bool ZMachO::NewArchO(uint8_t* pBase, uint32_t uLength)
@@ -59,11 +62,16 @@ void ZMachO::FreeArchOes()
 
 bool ZMachO::OpenFile(const char* szPath)
 {
-	FreeArchOes();
+	if (!Free()) {
+		return false;
+	}
 
 	m_sSize = 0;
 	m_pBase = (uint8_t*)ZFile::MapFile(szPath, 0, 0, &m_sSize, false);
 	if (NULL != m_pBase) {
+		if (m_sSize < sizeof(mach_header)) {
+			return false;
+		}
 		uint32_t magic = *((uint32_t*)m_pBase);
 		if (FAT_CIGAM == magic || FAT_MAGIC == magic) {
 			fat_header* pFatHeader = (fat_header*)m_pBase;
@@ -101,6 +109,8 @@ bool ZMachO::CloseFile()
 		ZLog::ErrorV(">>> CodeSign write(munmap) failed! Error: %p, %lu, %s\n", m_pBase, m_sSize, strerror(errno));
 		return false;
 	}
+	m_pBase = NULL;
+	m_sSize = 0;
 	return true;
 }
 
