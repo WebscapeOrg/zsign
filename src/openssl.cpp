@@ -107,34 +107,30 @@ bool ZSignAsset::CMSError()
 	return false;
 }
 
-void* ZSignAsset::GenerateASN1Type(const string& value)
+void* ZSignAsset::GenerateASN1Type(const string& value, const string& algorithm)
 {
+	if (algorithm != "sha1" && algorithm != "sha256") {
+		return NULL;
+	}
 	long errline = -1;
-	char* genstr = NULL;
-	BIO* ldapbio = BIO_new(BIO_s_mem());
-	CONF* cnf = NCONF_new(NULL);
-
-	if (cnf == NULL) {
-		ZLog::Error(">>> NCONF_new failed\n");
-		BIO_free(ldapbio);
+	BIO* input = BIO_new(BIO_s_mem());
+	CONF* config = NCONF_new(NULL);
+	if (!input || !config) {
+		BIO_free(input);
+		NCONF_free(config);
+		return NULL;
 	}
-	string a = "asn1=SEQUENCE:A\n[A]\nC=OBJECT:sha256\nB=FORMAT:HEX,OCT:" + value + "\n";
-	int code = BIO_puts(ldapbio, a.c_str());
-	if (NCONF_load_bio(cnf, ldapbio, &errline) <= 0) {
-		BIO_free(ldapbio);
-		NCONF_free(cnf);
-		ZLog::PrintV(">>> NCONF_load_bio failed %d\n", errline);
+	string definition = "asn1=SEQUENCE:A\n[A]\nC=OBJECT:" + algorithm + "\nB=FORMAT:HEX,OCT:" + value + "\n";
+	ASN1_TYPE* result = NULL;
+	if (BIO_puts(input, definition.c_str()) > 0 && NCONF_load_bio(config, input, &errline) > 0) {
+		const char* generator = NCONF_get_string(config, "default", "asn1");
+		if (generator) {
+			result = ASN1_generate_nconf(generator, config);
+		}
 	}
-	BIO_free(ldapbio);
-	genstr = NCONF_get_string(cnf, "default", "asn1");
-
-	if (genstr == NULL) {
-		ZLog::Error(">>> NCONF_get_string failed\n");
-		NCONF_free(cnf);
-	}
-	ASN1_TYPE* ret = ASN1_generate_nconf(genstr, cnf);
-	NCONF_free(cnf);
-	return ret;
+	BIO_free(input);
+	NCONF_free(config);
+	return result;
 }
 
 bool ZSignAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHashData, const string& strCDHashesPlist, const string& strCodeDirectorySlotSHA1, const string& strAltnateCodeDirectorySlot256, string& strCMSOutput)
@@ -210,28 +206,39 @@ bool ZSignAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHash
 		return CMSError();
 	}
 
-	// add CDHashes
-	string sha256;
-	char buf[16] = { 0 };
-	for (size_t i = 0; i < strAltnateCodeDirectorySlot256.size(); i++) {
-		snprintf(buf, sizeof(buf), "%02x", (uint8_t)strAltnateCodeDirectorySlot256[i]);
-		sha256 += buf;
-	}
-	transform(sha256.begin(), sha256.end(), sha256.begin(), ::toupper);
-
-	ASN1_OBJECT* obj2 = OBJ_txt2obj("1.2.840.113635.100.9.2", 1);
-	if (!obj2) {
+	ASN1_OBJECT* hashOID = OBJ_txt2obj("1.2.840.113635.100.9.2", 1);
+	X509_ATTRIBUTE* hashes = X509_ATTRIBUTE_new();
+	if (!hashOID || !hashes) {
+		ASN1_OBJECT_free(hashOID);
+		X509_ATTRIBUTE_free(hashes);
 		return CMSError();
 	}
-
-	X509_ATTRIBUTE* attr = X509_ATTRIBUTE_new();
-	X509_ATTRIBUTE_set1_object(attr, obj2);
-
-	ASN1_TYPE* type_256 = (ASN1_TYPE*)GenerateASN1Type(sha256);
-	X509_ATTRIBUTE_set1_data(attr, V_ASN1_SEQUENCE,
-		type_256->value.asn1_string->data, type_256->value.asn1_string->length);
-	int addHashSHA = CMS_signed_add1_attr(si, attr);
-	if (!addHashSHA) {
+	bool complete = X509_ATTRIBUTE_set1_object(hashes, hashOID) == 1;
+	ASN1_OBJECT_free(hashOID);
+	const string digests[] = { strCodeDirectorySlotSHA1, strAltnateCodeDirectorySlot256 };
+	const char* algorithms[] = { "sha1", "sha256" };
+	const size_t lengths[] = { 20, 32 };
+	for (size_t index = 0; complete && index < 2; index++) {
+		if (digests[index].size() != lengths[index]) {
+			complete = false;
+			break;
+		}
+		string hex;
+		const char* digits = "0123456789ABCDEF";
+		for (unsigned char byte : digests[index]) {
+			hex += digits[byte >> 4];
+			hex += digits[byte & 15];
+		}
+		ASN1_TYPE* value = (ASN1_TYPE*)GenerateASN1Type(hex, algorithms[index]);
+		complete = value && value->type == V_ASN1_SEQUENCE && X509_ATTRIBUTE_set1_data(hashes, V_ASN1_SEQUENCE,
+			value->value.asn1_string->data, value->value.asn1_string->length) == 1;
+		ASN1_TYPE_free(value);
+	}
+	if (complete) {
+		complete = CMS_signed_add1_attr(si, hashes) == 1;
+	}
+	X509_ATTRIBUTE_free(hashes);
+	if (!complete) {
 		return CMSError();
 	}
 
@@ -257,7 +264,6 @@ bool ZSignAsset::GenerateCMS(void* pscert, void* pspkey, const string& strCDHash
 
 	strCMSOutput.clear();
 	strCMSOutput.append(bptr->data, bptr->length);
-	ASN1_TYPE_free(type_256);
 	return (!strCMSOutput.empty());
 }
 
